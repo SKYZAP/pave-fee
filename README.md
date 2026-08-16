@@ -1,130 +1,149 @@
-# Event-Driven Architecture Starter
+# Fees API
 
-This is an event-driven microservices application using Pub/Sub for asynchronous communication between services.
+An Encore Go service for period-based fee billing. A bill starts a durable Temporal workflow, accepts idempotent line items while open, and closes into an immutable invoice at an explicit request or the billing-period end.
 
-The example in this starter is an Uptime Monitoring System that continuously monitors the uptime of a list of websites. 
+## What it provides
 
-When it detects a website is down, it posts a Slack message notifying that the website is down, and another message when the website is back up again.
+- Bills in a single immutable currency: `GEL` or `USD`.
+- Progressive, idempotent line-item accrual in integer minor units.
+- A Temporal workflow per bill for serialized updates and period-end closure.
+- PostgreSQL row locking as the final add-versus-close integrity boundary.
+- An immutable invoice and a transactional `bill.closed` outbox event on closure.
+- A React UI for creating bills, adding items, reviewing totals, and closing bills.
 
-It has a react frontend and you can try a demo version [here](https://uptime.encore.build/).
+GEL uses tetri and USD uses cents. The service never converts or combines currencies: every line item must match its bill’s currency.
 
-[![Deploy to Encore](https://github.com/encoredev/examples/raw/main/assets/deploytoenc.svg)](https://app.encore.cloud/create-app/clone/uptime)
+## Architecture
 
-![Frontend](https://encore.dev/assets/tutorials/uptime/frontend.png)
-![Architecture](https://encore.dev/assets/tutorials/uptime/encore-flow.png)
-
-## Build from scratch with a tutorial
-
-If you prefer, check out the [tutorial](https://encore.dev/docs/go/tutorials/uptime) to learn how to build this application from scratch.
-
-## Prerequisites 
-
-**Install Encore:**
-- **macOS:** `brew install encoredev/tap/encore`
-- **Linux:** `curl -L https://encore.dev/install.sh | bash`
-- **Windows:** `iwr https://encore.dev/install.ps1 | iex`
-  
-**Docker:**
-1. Install [Docker](https://docker.com)
-2. Start Docker
-
-## Create app
-
-Create a local app from this template:
-
-```bash
-encore app create my-app-name --example=uptime
+```mermaid
+flowchart LR
+    UI[React / Vite frontend] --> API[Encore Fees API]
+    API --> DB[(Encore PostgreSQL<br/>bills, line_items, outbox_events)]
+    API --> Temporal[Temporal Server]
+    Temporal --> TemporalDB[(Temporal PostgreSQL<br/>workflow history)]
+    API --> Events[Encore Pub/Sub<br/>bill.closed]
 ```
 
-## Run app locally
+The local `temporal-postgres` Docker container is Temporal Server’s persistence store. Financial data uses the Encore-managed `fees` PostgreSQL database.
 
-Before running your application, make sure you have Docker installed and running. Then run this command from your application's root folder:
+## Repository layout
+
+```text
+fees/
+├── api.go                 # Encore endpoints
+├── service.go             # Lifecycle, Temporal worker, service dependencies
+├── outbox.go              # bill.closed relay
+├── contracts.go           # API DTOs and domain mapping
+├── migrations/
+│   └── 1_create_billing_tables.up.sql
+├── config/                # Temporal configuration
+├── domain/                # Currency, lifecycle, validation, totals
+├── database/              # PostgreSQL repository and transaction tests
+└── temporal/              # Workflow, activities, timer tests
+frontend/                  # React/Vite user interface
+docker-compose.temporal.yml
+```
+
+See [the technical specification](docs/fees-api-tech-spec.md) for the ERD, API details, workflow behavior, and known limitations.
+
+## Prerequisites
+
+- Go 1.22 or later
+- [Encore](https://encore.dev/docs/go/install)
+- Docker Desktop or a compatible Docker daemon
+- Node.js and npm for frontend development
+
+## Run locally
+
+Start Temporal and its local persistence database:
+
+```bash
+docker compose -f docker-compose.temporal.yml up -d
+```
+
+Start the Encore application:
 
 ```bash
 encore run
 ```
-To use the Slack integration, set the Slack Webhook URL (see tutorial above):
 
-```bash
-encore secret set --type local,dev,pr,prod SlackWebhookURL
+Endpoints and UI:
+
+- App and embedded frontend: `http://localhost:4000`
+- Encore dashboard: `http://localhost:9400`
+- Temporal UI: `http://localhost:8080`
+
+The default Temporal settings are:
+
+```text
+FEES_TEMPORAL_ADDRESS=127.0.0.1:7233
+FEES_TEMPORAL_NAMESPACE=default
+FEES_TEMPORAL_TASK_QUEUE=fees-bills
 ```
 
-**Note:** Cron Jobs do not execute when running locally.
+## API workflow
 
-## View the frontend
+All mutating requests require `Idempotency-Key`.
 
-While `encore run` is running, head over to [http://localhost:4000/frontend/](http://localhost:4000/frontend/) to view the frontend for your uptime monitor.
-
-## Using the API
-
-Check if a given site is up (defaults to 'https://' if left out):
-```bash
-curl 'http://localhost:4000/ping/google.com'
-```
-
-Add a site to be automatically pinged every 1 hour:
-```bash
-curl 'http://localhost:4000/site' -d '{"url":"google.com"}'
-```
-
-Check all tracked sites immediately:
-```bash
-curl -X POST 'http://localhost:4000/check-all'
-```
-
-Get the current status of all tracked sites:
-```bash
-curl 'http://localhost:4000/status'
-```
-
-## Local Development Dashboard
-
-While `encore run` is running, open [http://localhost:9400/](http://localhost:9400/) to access Encore's [local developer dashboard](https://encore.dev/docs/go/observability/dev-dash).
-
-Here you can see traces for all requests you've made, see the application architecture diagram, and see API documentation in the Service Catalog.
-
-## Connecting to databases
-
-You can connect to your databases via psql shell:
+Create a USD bill:
 
 ```bash
-encore db shell <database-name> --env=local --superuser
+curl -X POST http://localhost:4000/v1/bills \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: create-merchant-123-2026-08" \
+  -d '{"owner_id":"merchant_123","currency":"USD","period_start":"2026-08-01T00:00:00Z","period_end":"2026-09-01T00:00:00Z"}'
 ```
 
-Learn more in the [CLI docs](https://encore.dev/docs/go/cli/cli-reference#database-management).
-
-## Deployment
-
-### Self-hosting
-
-See the [self-hosting instructions](https://encore.dev/docs/go/self-host/docker-build) for how to use `encore build docker` to create a Docker image and configure it.
-
-### Encore Cloud Platform
-
-Deploy your application to a free staging environment in Encore's development cloud using `git push encore`:
+Store the returned ID as `bill_id`, then add a matching-currency line item:
 
 ```bash
-git add -A .
-git commit -m 'Commit message'
-git push encore
+curl -X POST http://localhost:4000/v1/bills/{bill_id}/items \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: usage-usd-001" \
+  -d '{"description":"API usage","currency":"USD","amount":2000,"source":"usage-service"}'
 ```
 
-You can also open your app in the [Cloud Dashboard](https://app.encore.dev) to integrate with GitHub, or connect your AWS/GCP account, enabling Encore to automatically handle cloud deployments for you.
+Read the current bill projection:
 
-## Link to GitHub
+```bash
+curl "http://localhost:4000/v1/bills/{bill_id}"
+```
 
-Follow these steps to link your app to GitHub:
+Close the bill:
 
-1. Create a GitHub repo, commit and push the app.
-2. Open your app in the [Cloud Dashboard](https://app.encore.dev).
-3. Go to **Settings ➔ GitHub** and click on **Link app to GitHub** to link your app to GitHub and select the repo you just created.
-4. To configure Encore to automatically trigger deploys when you push to a specific branch name, go to the **Overview** page for your intended environment. Click on **Settings** and then in the section **Branch Push** configure the **Branch name** and hit **Save**.
-5. Commit and push a change to GitHub to trigger a deploy.
+```bash
+curl -X POST http://localhost:4000/v1/bills/{bill_id}/close \
+  -H "Idempotency-Key: close-merchant-123-2026-08"
+```
 
-[Learn more in the docs](https://encore.dev/docs/platform/integrations/github)
+The close response contains the final native-currency total, complete line-item snapshot, status, and closure time. A GEL line item on this USD bill is rejected with `currency_mismatch`.
 
-## Testing
+## Development and verification
+
+Backend:
 
 ```bash
 encore test ./...
+encore check
 ```
+
+Frontend:
+
+```bash
+cd frontend
+npm ci
+npm test -- --runInBand
+npm run build
+```
+
+`encore check` compiles, migrates a local database, boots all services, and confirms the application is healthy.
+
+## Database reset
+
+The current schema is intentionally a single reset-only migration for local development. To recreate the local Fees database after changing migration history:
+
+```bash
+encore db reset fees
+```
+
+Do not rewrite applied migrations in a deployed environment; create a new forward migration instead.

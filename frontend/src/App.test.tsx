@@ -1,105 +1,81 @@
-import {
-  render,
-  screen,
-  waitForElementToBeRemoved,
-} from "@testing-library/react";
-import App from "./App";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import React, { FC, PropsWithChildren } from "react";
-import { APIError, ErrCode, monitor, site } from "./client";
-import { userEvent } from "@testing-library/user-event";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import App from "./App";
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      retry: false,
-    },
-  },
-});
-
-const wrapper: FC<PropsWithChildren> = ({ children }) => (
-  <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
-);
-
-const ListResponse: site.ListResponse = { sites: [{ id: 1, url: "test.dev" }] };
-const StatusResponse: monitor.StatusResponse = {
-  sites: {
-    1: {
-      up: true,
-      checked_at: Date.now().toString(),
-    },
-  },
+const bill = {
+  id: "bill-1",
+  owner_id: "merchant_123",
+  period_start: "2026-08-01T00:00:00Z",
+  period_end: "2026-09-01T00:00:00Z",
+  status: "OPEN",
+  currency: "USD",
+  total: null,
+  line_items: [],
+  version: 0,
+  workflow_id: "bill-bill-1",
 };
 
-describe("App", () => {
+const detailedBill = {
+  ...bill,
+  status: "CLOSED",
+  total: [{ currency: "USD", amount: 2648 }],
+  closed_at: "2026-09-01T00:00:03Z",
+};
+
+function renderApp() {
+  return render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <App />
+    </QueryClientProvider>,
+  );
+}
+
+describe("Fees app", () => {
   beforeEach(() => {
-    jest
-      .spyOn(site.ServiceClient.prototype, "List")
-      .mockReturnValue(Promise.resolve(ListResponse));
-
-    jest
-      .spyOn(monitor.ServiceClient.prototype, "Status")
-      .mockReturnValue(Promise.resolve(StatusResponse));
-
-    jest.spyOn(site.ServiceClient.prototype, "Add");
-    jest.spyOn(site.ServiceClient.prototype, "Delete");
-  });
-
-  afterEach(() => {
-    queryClient.clear();
-  });
-
-  it("render sites", async () => {
-    render(<App />, { wrapper });
-    await waitForElementToBeRemoved(() => screen.queryByText("Loading..."));
-
-    expect(site.ServiceClient.prototype.List).toBeCalledTimes(1);
-    expect(monitor.ServiceClient.prototype.Status).toBeCalledTimes(1);
-
-    screen.getAllByText("test.dev");
-    screen.getByText("Up");
-  });
-
-  it("render api error", async () => {
-    jest.spyOn(site.ServiceClient.prototype, "List").mockReturnValue(
-      Promise.reject(
-        new APIError(500, {
-          code: ErrCode.Unknown,
-          message: "request failed",
-        }),
-      ),
-    );
-
-    render(<App />, { wrapper });
-    await waitForElementToBeRemoved(() => screen.queryByText("Loading..."));
-
-    screen.getAllByText("request failed");
-  });
-
-  it("add site", async () => {
-    render(<App />, { wrapper });
-    await waitForElementToBeRemoved(() => screen.queryByText("Loading..."));
-
-    await userEvent.click(screen.getByText("Add website"));
-
-    await userEvent.type(
-      screen.getByPlaceholderText("google.com"),
-      "another.com",
-    );
-
-    await userEvent.click(screen.getByText("Save"));
-
-    expect(site.ServiceClient.prototype.Add).toHaveBeenCalledWith({
-      url: "another.com",
+    window.history.pushState({}, "", "/bills");
+    window.fetch = jest.fn().mockImplementation((input, init) => {
+      const url = String(input);
+      if (url.includes("/v1/bills?")) {
+        return Promise.resolve(new Response(JSON.stringify({ bills: [bill] }), { status: 200 }));
+      }
+      if (url.endsWith("/v1/bills/bill-1")) {
+        return Promise.resolve(new Response(JSON.stringify(detailedBill), { status: 200 }));
+      }
+      return Promise.resolve(new Response(JSON.stringify({ message: "not found" }), { status: 404 }));
     });
   });
 
-  it("delete site", async () => {
-    render(<App />, { wrapper });
-    await waitForElementToBeRemoved(() => screen.queryByText("Loading..."));
+  it("shows bills and separate currency-aware status", async () => {
+    renderApp();
+    expect(await screen.findByText("Bills")).toBeInTheDocument();
+    expect((await screen.findAllByText("OPEN")).length).toBeGreaterThan(1);
+  });
 
-    await userEvent.click(screen.getByText("Delete"));
+  it("navigates to bill creation", async () => {
+    renderApp();
+    await userEvent.click(await screen.findByText("Create bill"));
+    expect(screen.getByText("Create a bill")).toBeInTheDocument();
+  });
 
-    expect(site.ServiceClient.prototype.Delete).toHaveBeenCalledWith(1);
+  it("renders an empty state when the API returns a null bill list", async () => {
+    window.fetch = jest.fn().mockImplementation((input) => {
+      const url = String(input);
+      if (url.includes("/v1/bills?")) {
+        return Promise.resolve(new Response(JSON.stringify({ bills: null }), { status: 200 }));
+      }
+      return Promise.resolve(new Response(JSON.stringify({ message: "not found" }), { status: 404 }));
+    });
+
+    renderApp();
+
+    expect(await screen.findByText("No bills match this filter.")).toBeInTheDocument();
+  });
+
+  it("shows a single bill currency total in bill details", async () => {
+    renderApp();
+    await userEvent.click(await screen.findByText("0 USD line items"));
+    expect(await screen.findByText("Bill total (USD)")).toBeInTheDocument();
+    expect(screen.queryByText(/FX rate used/i)).not.toBeInTheDocument();
   });
 });

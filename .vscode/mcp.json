@@ -1,0 +1,22 @@
+{
+    "servers": {
+        "encore-local": {
+            "args": [
+                "mcp",
+                "run",
+                "--app=ykqo4"
+            ],
+            "command": "encore"
+        },
+        "cloth": {
+            "url": "http://127.0.0.1:7332/mcp"
+        },
+        "shadcn": {
+            "command": "npx",
+            "args": [
+                "shadcn@latest",
+                "mcp"
+            ]
+        }
+    }
+}

@@ -1,272 +1,102 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { DateTime } from "luxon";
-import React, { FC, useEffect, useState } from "react";
-import Client, { monitor, site } from "./client";
+import { useState, type ReactNode } from "react";
+import { feesAPI } from "./api/fees";
+import { retainIdempotencyKey } from "./api/idempotency";
+import { errorMessage } from "./lib/errors";
+import { formatMoney } from "./lib/money";
+import type { Bill, Currency } from "./types/fees";
+import { Badge } from "./components/ui/Badge";
+import { Button } from "./components/ui/Button";
+import { Card } from "./components/ui/Card";
 
-const client = new Client(window.location.origin);
+const ownerID = "merchant_123";
 
-function App() {
+export default function App() {
+  const [path, setPath] = useState(window.location.pathname);
+  const navigate = (next: string) => {
+    window.history.pushState({}, "", next);
+    setPath(next);
+  };
+
+  if (path === "/bills/new") return <Shell><CreateBillPage navigate={navigate} /></Shell>;
+  const invoice = path.match(/^\/bills\/([^/]+)\/invoice$/);
+  if (invoice) return <Shell><BillPage id={invoice[1]} invoice navigate={navigate} /></Shell>;
+  const details = path.match(/^\/bills\/([^/]+)$/);
+  if (details) return <Shell><BillPage id={details[1]} navigate={navigate} /></Shell>;
+  return <Shell><Dashboard navigate={navigate} /></Shell>;
+}
+
+function Shell({ children }: { children: ReactNode }) {
   return (
-    <>
-      <div className="min-h-full container px-4 mx-auto my-16">
-        <h2 className="text-2xl font-bold leading-7 text-gray-900 sm:truncate sm:text-3xl sm:tracking-tight">
-          Uptime Monitoring
-        </h2>
-
-        <main className="pt-8 pb-16">
-          <SiteList />
-        </main>
-      </div>
-    </>
+    <div className="min-h-screen bg-slate-50 text-slate-900">
+      <header className="border-b border-slate-200 bg-white">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-5">
+          <button className="text-xl font-bold tracking-tight" onClick={() => window.location.assign("/bills")}>Fees Ledger</button>
+          <span className="text-sm text-slate-500">{ownerID}</span>
+        </div>
+      </header>
+      <main className="mx-auto max-w-6xl px-6 py-10">{children}</main>
+    </div>
   );
 }
 
-const SiteList: FC = () => {
-  const { isLoading, error, data } = useQuery({
-    queryKey: ["sites"],
-    queryFn: () => client.site.List(),
-    refetchInterval: 10000, // 10s
-    retry: false,
-  });
+function Dashboard({ navigate }: { navigate: (path: string) => void }) {
+  const query = useQuery({ queryKey: ["bills"], queryFn: () => feesAPI.listBills(ownerID) });
+  const [filter, setFilter] = useState<"ALL" | "OPEN" | "CLOSED">("ALL");
+  const bills = (query.data?.bills ?? []).filter((bill) => filter === "ALL" || bill.status === filter);
+  return (
+    <div className="space-y-8">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div><p className="text-sm font-semibold uppercase tracking-widest text-indigo-600">Billing workspace</p><h1 className="mt-2 text-4xl font-bold tracking-tight">Bills</h1><p className="mt-2 text-slate-500">Immutable invoices in their bill currency.</p></div>
+        <Button onClick={() => navigate("/bills/new")}>Create bill</Button>
+      </div>
+      {query.isLoading && <Card>Loading bills…</Card>}
+      {query.error && <Card className="border-rose-200 text-rose-700">{errorMessage(query.error)}</Card>}
+      {!query.isLoading && !query.error && <Card>
+        <div className="mb-6 flex gap-2">{(["ALL", "OPEN", "CLOSED"] as const).map((value) => <button key={value} onClick={() => setFilter(value)} className={`rounded-full px-3 py-1 text-sm ${filter === value ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-600"}`}>{value}</button>)}</div>
+        {bills.length === 0 ? <p className="py-12 text-center text-slate-400">No bills match this filter.</p> : <div className="divide-y divide-slate-100">{bills.map((bill) => <BillRow key={bill.id} bill={bill} navigate={navigate} />)}</div>}
+      </Card>}
+    </div>
+  );
+}
 
-  const { data: status } = useQuery({
-    queryKey: ["status"],
-    queryFn: () => client.monitor.Status(),
-    refetchInterval: 1000, // every second
-    retry: false,
-  });
+function BillRow({ bill, navigate }: { bill: Bill; navigate: (path: string) => void }) {
+  return <button onClick={() => navigate(`/bills/${bill.id}`)} className="flex w-full items-center justify-between gap-4 py-4 text-left hover:bg-slate-50">
+    <div><div className="flex items-center gap-3 font-semibold"><span>{new Date(bill.period_start).toLocaleDateString()} – {new Date(bill.period_end).toLocaleDateString()}</span><Badge status={bill.status} /></div><p className="mt-1 text-sm text-slate-500">{bill.line_items?.length ?? 0} {bill.currency} line items</p></div>
+    <Totals total={bill.total ?? []} />
+  </button>;
+}
 
+function CreateBillPage({ navigate }: { navigate: (path: string) => void }) {
+  const [start, setStart] = useState("");
+  const [end, setEnd] = useState("");
+  const [currency, setCurrency] = useState<Currency>("USD");
+  const mutation = useMutation({
+    mutationFn: () => feesAPI.createBill(
+      { owner_id: ownerID, currency, period_start: new Date(start).toISOString(), period_end: new Date(end).toISOString() },
+      retainIdempotencyKey(undefined),
+    ),
+    onSuccess: (bill) => navigate(`/bills/${bill.id}`),
+  });
+  const invalid = !start || !end || new Date(end) <= new Date(start);
+  return <div className="mx-auto max-w-xl space-y-6"><div><p className="text-sm font-semibold uppercase tracking-widest text-indigo-600">New billing period</p><h1 className="mt-2 text-4xl font-bold">Create a bill</h1></div><Card><form className="space-y-5" onSubmit={(event) => { event.preventDefault(); mutation.mutate(); }}><label className="block text-sm font-medium">Bill currency<select value={currency} onChange={(event) => setCurrency(event.target.value as Currency)} className="mt-2 w-full rounded-lg border-slate-300"><option value="USD">USD</option><option value="GEL">GEL</option></select></label><label className="block text-sm font-medium">Period start<input required type="datetime-local" value={start} onChange={(event) => setStart(event.target.value)} className="mt-2 w-full rounded-lg border-slate-300" /></label><label className="block text-sm font-medium">Period end<input required type="datetime-local" value={end} onChange={(event) => setEnd(event.target.value)} className="mt-2 w-full rounded-lg border-slate-300" /></label>{invalid && start && end && <p className="text-sm text-rose-600">The period end must be after the start.</p>}{mutation.error && <p className="text-sm text-rose-600">{errorMessage(mutation.error)}</p>}<div className="flex gap-3"><Button type="button" className="!bg-red-600 !text-white hover:!bg-red-700" onClick={() => navigate("/bills")}>Cancel</Button><Button disabled={invalid || mutation.isPending}>{mutation.isPending ? "Creating…" : "Create bill"}</Button></div></form></Card></div>;
+}
+
+function BillPage({ id, invoice = false, navigate }: { id: string; invoice?: boolean; navigate: (path: string) => void }) {
   const queryClient = useQueryClient();
+  const query = useQuery({ queryKey: ["bill", id], queryFn: () => feesAPI.getBill(id) });
+  const [description, setDescription] = useState("");
+  const [amount, setAmount] = useState("");
+  const add = useMutation({ mutationFn: () => feesAPI.addLineItem(id, { description, currency: query.data?.currency ?? "USD", amount: Number(amount), source: "fees-ui" }, retainIdempotencyKey(undefined)), onSuccess: () => { setDescription(""); setAmount(""); queryClient.invalidateQueries({ queryKey: ["bill", id] }); } });
+  const close = useMutation({ mutationFn: () => feesAPI.closeBill(id, retainIdempotencyKey(undefined)), onSuccess: () => queryClient.invalidateQueries({ queryKey: ["bill", id] }) });
+  if (query.isLoading) return <Card>Loading bill…</Card>;
+  if (query.error || !query.data) return <Card className="text-rose-700">{errorMessage(query.error)}</Card>;
+  const bill = query.data;
+  const lineItems = bill.line_items ?? [];
+  const itemCurrency = bill.currency;
+  return <div className="space-y-8"><div className="flex flex-wrap items-start justify-between gap-4"><div><button className="text-sm text-indigo-600" onClick={() => navigate("/bills")}>← All bills</button><h1 className="mt-3 text-4xl font-bold">{invoice ? "Invoice" : "Bill details"}</h1><p className="mt-2 text-slate-500">{new Date(bill.period_start).toLocaleString()} – {new Date(bill.period_end).toLocaleString()}</p></div><Badge status={bill.status} /></div><Card><div className="flex items-center justify-between"><h2 className="text-lg font-semibold">Bill total ({bill.currency})</h2><Totals total={bill.total ?? []} /></div></Card><Card><h2 className="mb-4 text-lg font-semibold">{invoice ? "Charged line items" : "Line items"}</h2><div className="divide-y divide-slate-100">{lineItems.map((item) => <div key={item.id} className="flex items-center justify-between py-3"><div><p className="font-medium">{item.description}</p><p className="text-xs text-slate-400">{item.transaction_id} · {item.source}</p></div><span className="font-semibold">{formatMoney({ currency: item.currency, amount: item.amount })}</span></div>)}{lineItems.length === 0 && <p className="py-8 text-center text-slate-400">No line items yet.</p>}</div></Card>{!invoice && bill.status === "OPEN" && <Card><h2 className="mb-4 text-lg font-semibold">Add line item</h2><form className="grid gap-4 md:grid-cols-[1fr_8rem_auto]" onSubmit={(event) => { event.preventDefault(); add.mutate(); }}><input required placeholder="Description" value={description} onChange={(event) => setDescription(event.target.value)} className="rounded-lg border-slate-300" /><input required min="1" type="number" placeholder={`${itemCurrency} minor units`} value={amount} onChange={(event) => setAmount(event.target.value)} className="rounded-lg border-slate-300" /><Button disabled={add.isPending}>{add.isPending ? "Adding…" : "Add item"}</Button></form>{add.error && <p className="mt-3 text-sm text-rose-600">{errorMessage(add.error)}</p>}<div className="mt-6 flex justify-end"><Button className="bg-slate-900 hover:bg-slate-700" disabled={close.isPending} onClick={() => { if (window.confirm("Close this bill permanently?")) close.mutate(); }}>{close.isPending ? "Closing…" : "Close bill"}</Button></div></Card>}{bill.status === "CLOSED" && !invoice && <Button onClick={() => navigate(`/bills/${id}/invoice`)}>View immutable invoice</Button>}</div>;
+}
 
-  const doDelete = useMutation({
-    mutationFn: (site: site.Site) => {
-      return client.site.Delete(site.id);
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["sites"] });
-    },
-  });
-
-  if (isLoading) {
-    return <div>Loading...</div>;
-  } else if (error) {
-    return <div className="text-red-600">{(error as Error).message}</div>;
-  }
-
-  const now = DateTime.now();
-  return (
-    <>
-      <div className="sm:flex sm:items-center">
-        <div className="sm:flex-auto">
-          <h1 className="text-xl font-semibold text-gray-900">
-            Monitored Websites
-          </h1>
-          <p className="mt-2 text-sm text-gray-700">
-            A list of all the websites being monitored, their current status,
-            and when they were last checked.
-          </p>
-        </div>
-        <div className="mt-4 sm:mt-0 sm:ml-16 sm:flex-none">
-          <AddSiteForm />
-        </div>
-      </div>
-
-      <div className="mt-8 flex flex-col">
-        <div className="-my-2 -mx-4 overflow-x-auto sm:-mx-6 lg:-mx-8">
-          <div className="inline-block min-w-full py-2 align-middle md:px-6 lg:px-8">
-            <div className="overflow-hidden shadow ring-1 ring-black ring-opacity-5 md:rounded-lg">
-              <table className="min-w-full divide-y divide-gray-300">
-                <thead className="bg-gray-50">
-                  <tr>
-                    <th
-                      scope="col"
-                      className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900"
-                    >
-                      Site
-                    </th>
-                    <th
-                      scope="col"
-                      className="relative py-3.5 pl-3 pr-4 sm:pr-6"
-                    >
-                      <span className="sr-only"></span>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-200 bg-white">
-                  {data?.sites.length === 0 && (
-                    <tr>
-                      <td
-                        colSpan={2}
-                        className={"text-center text-gray-400 py-8"}
-                      >
-                        Nothing to monitor yet. Add a website to see it here.
-                      </td>
-                    </tr>
-                  )}
-                  {data!.sites.map((site) => {
-                    const st = status?.sites[site.id];
-                    const dt = st && DateTime.fromISO(st.checked_at);
-                    return (
-                      <tr key={site.id}>
-                        <td className="px-3 py-4 text-sm">
-                          <div className="flex items-center gap-2">
-                            <span className="text-gray-700">{site.url}</span>
-                            <StatusBadge status={st} />
-                          </div>
-                          {dt && (
-                            <div className="text-gray-400">
-                              Last checked <TimeDelta dt={dt} />
-                            </div>
-                          )}
-                        </td>
-                        <td className="relative whitespace-nowrap py-4 pl-3 pr-4 text-right text-sm font-medium sm:pr-6">
-                          <button
-                            className="text-indigo-600 hover:text-indigo-900"
-                            onClick={() => doDelete.mutate(site)}
-                          >
-                            Delete<span className="sr-only"> {site.url}</span>
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      </div>
-    </>
-  );
-};
-
-const AddSiteForm: FC = () => {
-  const [formOpen, setFormOpen] = useState(false);
-  const [url, setUrl] = useState("");
-
-  const queryClient = useQueryClient();
-
-  const save = useMutation({
-    mutationFn: async (url: string) => {
-      if (!validURL(url)) {
-        return;
-      }
-
-      await client.site.Add({ url });
-      setFormOpen(false);
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["sites"] });
-      queryClient.invalidateQueries({ queryKey: ["status"] });
-    },
-  });
-
-  const onSubmit = (event: React.FormEvent) => {
-    event.preventDefault();
-    save.mutate(url);
-  };
-
-  if (!formOpen) {
-    return (
-      <button
-        type="button"
-        className="inline-flex items-center justify-center rounded-md border border-transparent bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 sm:w-auto"
-        onClick={() => setFormOpen(true)}
-      >
-        Add website
-      </button>
-    );
-  }
-
-  return (
-    <form onSubmit={onSubmit}>
-      <div className="flex flex-col md:flex-row md:items-end gap-4">
-        <div>
-          <input
-            type="text"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            placeholder="google.com"
-            className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
-          />
-        </div>
-
-        <div>
-          <button
-            type="submit"
-            className="inline-flex justify-center rounded-md border border-transparent bg-indigo-600 py-2 px-4 text-sm font-medium text-white shadow-sm enabled:hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:opacity-75"
-            disabled={!validURL(url)}
-          >
-            Save
-          </button>
-        </div>
-      </div>
-    </form>
-  );
-};
-
-export default App;
-
-const validURL = (url: string) => {
-  const idx = url.lastIndexOf(".");
-  if (idx === -1 || url.substring(idx + 1) === "") {
-    return false;
-  }
-
-  if (!url.startsWith("http:") && !url.startsWith("https:")) {
-    url = "https://" + url;
-  }
-
-  try {
-    const u = new URL(url);
-    return u.protocol === "http:" || u.protocol === "https:";
-  } catch (_) {
-    return false;
-  }
-};
-
-const StatusBadge: FC<{ status: monitor.SiteStatus | undefined }> = ({
-  status,
-}) => {
-  const up = status?.up;
-  return up ? (
-    <Badge color="green">Up</Badge>
-  ) : up === false ? (
-    <Badge color="red">Down</Badge>
-  ) : (
-    <Badge color="gray">Unknown</Badge>
-  );
-};
-
-const Badge: FC<{
-  color: "green" | "red" | "orange" | "gray";
-  children?: React.ReactNode;
-}> = ({ color, children }) => {
-  const [bgColor, textColor] = {
-    green: ["bg-green-100", "text-green-800"],
-    red: ["bg-red-100", "text-red-800"],
-    orange: ["bg-orange-100", "text-orange-800"],
-    gray: ["bg-gray-100", "text-gray-800"],
-  }[color]!;
-
-  return (
-    <span
-      className={`inline-flex items-center rounded-md px-2.5 py-0.5 text-sm font-medium uppercase ${bgColor} ${textColor}`}
-    >
-      {children}
-    </span>
-  );
-};
-
-const TimeDelta: FC<{ dt: DateTime }> = ({ dt }) => {
-  const compute = () => dt.toRelative();
-  const [str, setStr] = useState(compute());
-
-  useEffect(() => {
-    const handler = () => setStr(compute());
-    const timer = setInterval(handler, 1000);
-    return () => clearInterval(timer);
-  }, [dt]);
-
-  return <>{str}</>;
-};
+function Totals({ total }: { total: Bill["total"] }) {
+  return <div className="flex gap-4">{(total ?? []).map((money) => <span key={money.currency} className="text-sm font-semibold text-slate-600">{formatMoney(money)}</span>)}</div>;
+}
