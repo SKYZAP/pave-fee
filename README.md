@@ -6,7 +6,7 @@ An Encore Go service for period-based fee billing. A bill starts a durable Tempo
 
 - Bills in a single immutable currency: `GEL` or `USD`.
 - Progressive, idempotent line-item accrual in integer minor units.
-- A Temporal workflow per bill for serialized updates and period-end closure.
+- A Temporal workflow per bill for durable updates and period-end closure.
 - PostgreSQL row locking as the final add-versus-close integrity boundary.
 - An immutable invoice and a transactional `bill.closed` outbox event on closure.
 - A React UI for creating bills, adding items, reviewing totals, and closing bills.
@@ -118,6 +118,8 @@ curl -X POST http://localhost:4000/v1/bills/{bill_id}/close \
 
 The close response contains the final native-currency total, complete line-item snapshot, status, and closure time. A GEL line item on this USD bill is rejected with `currency_mismatch`.
 
+The endpoints are currently public and accept caller-supplied `owner_id` values. They are suitable for local development only until authentication and owner authorization are added.
+
 ## Development and verification
 
 Backend:
@@ -136,7 +138,7 @@ npm test -- --runInBand
 npm run build
 ```
 
-`encore check` compiles, migrates a local database, boots all services, and confirms the application is healthy.
+`encore check` compiles, applies local migrations, and boots the application.
 
 ## Database reset
 

@@ -9,7 +9,7 @@ The Fees API creates a bill at the beginning of a fee period, accepts progressiv
 
 Each bill has one immutable currency: `GEL` or `USD`. Every line item must use that same currency. The service does not perform FX conversion, combine currencies, or use floating-point arithmetic.
 
-Temporal provides durable workflow execution, serialized add/close commands, retryable activities, and a period-end timer. Encore PostgreSQL stores the authoritative bill, line-item, and outbox projection.
+Temporal provides durable workflow execution, update delivery, retryable activities, and a period-end timer. Encore PostgreSQL stores the authoritative bill, line-item, and outbox projection; its row locks are the final add-versus-close ordering boundary.
 
 ## 2. Architecture
 
@@ -32,13 +32,13 @@ sequenceDiagram
 
     Client->>API: Add line item
     API->>TC: Update AddLineItem
-    TC->>Workflow: Serialize update
+    TC->>Workflow: Deliver update
     Workflow->>Activity: Append line item
     Activity->>DB: Lock bill and insert item
 
     Client->>API: Close bill
     API->>TC: Update CloseBill
-    TC->>Workflow: Serialize update
+    TC->>Workflow: Deliver update
     Workflow->>Activity: Close bill
     Activity->>DB: Lock, total, close, outbox insert
     Outbox->>Outbox: Poll pending event
@@ -270,10 +270,10 @@ Activity retries use a bounded exponential policy: initial delay one second, max
 
 ## 8. Consistency and idempotency
 
-- Temporal serializes workflow updates.
+- Temporal provides durable workflow updates; PostgreSQL row locks are the final ordering boundary.
 - PostgreSQL row locks are the final integrity boundary if another writer bypasses Temporal.
 - Add versus close is deterministic: whichever locks the bill first wins; an add after close receives `bill_closed`.
-- A repeated line-item transaction ID returns the original item when the request hash matches and returns a conflict when it differs.
+- At the repository layer, a repeated line-item transaction ID returns the original item when the request hash matches and returns a conflict when it differs.
 - The close transaction derives the total only from persisted items; clients cannot submit a bill total.
 - The closed invoice and outbox event commit atomically.
 
@@ -328,5 +328,6 @@ npm run build
 - No authentication or authorization is enforced.
 - An automatic close permanently fails its workflow after retry exhaustion; there is no automated repair workflow.
 - Workflow startup is asynchronous, so an immediate update can encounter a transient workflow-not-found failure.
+- The API uses the line-item idempotency key as the Temporal update ID. Temporal may return a prior update result for a repeated key before the repository can compare its request hash.
 - The outbox relay does not increment attempts or apply backoff.
 - The database schema currently comes from one reset-only migration. Do not rewrite an applied migration in a deployed environment; create a new forward migration instead.

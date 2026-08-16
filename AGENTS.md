@@ -29,6 +29,7 @@ The Go module path is `encore.app`. Read `.github/copilot-instructions.md` for t
 │   ├── service.go                     Service lifecycle, Temporal worker, and database setup
 │   ├── contracts.go                   External DTOs and mappings to domain types
 │   ├── outbox.go                      bill.closed relay to Encore Pub/Sub
+│   ├── encore.gen.go                  Generated Encore bindings; never edit manually
 │   ├── migrations/
 │   │   └── 1_create_billing_tables.up.sql
 │   ├── config/
@@ -56,7 +57,7 @@ The Go module path is `encore.app`. Read `.github/copilot-instructions.md` for t
     └── dist/                          Generated Vite build; never edit manually
 ```
 
-`fees/` is the only Encore service. Its root package must remain thin because Encore discovers service declarations and endpoint annotations there. Code in `fees/temporal/` may call activities only; it must never query PostgreSQL directly. `fees/database/` is the sole owner of SQL and transaction boundaries.
+`fees/` is the backend Encore service. `frontend/` also exposes Encore's raw static-file endpoint. Keep the `fees` root package thin because Encore discovers its service declarations and endpoint annotations there. Code in `fees/temporal/` may call activities only; it must never query PostgreSQL directly. `fees/database/` is the sole owner of SQL and transaction boundaries.
 
 `frontend/dist/` is a generated artifact required by `frontend/frontend.go` at runtime. Rebuild it with `npm run build` after frontend source changes, but do not hand-edit it.
 
