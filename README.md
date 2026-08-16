@@ -64,6 +64,8 @@ docker compose -f docker-compose.temporal.yml up -d
 Start the Encore application:
 
 ```bash
+cd frontend
+npm run build
 encore run
 ```
 
